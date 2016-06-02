@@ -202,6 +202,7 @@ main(int argc, char *argv[])
 	char *buf = safe_malloc(SPA_MAXBLOCKSIZE);
 	uint64_t drr_record_count[DRR_NUMTYPES] = { 0 };
 	uint64_t total_records = 0;
+	uint64_t payload_size;
 	dmu_replay_record_t thedrr;
 	dmu_replay_record_t *drr = &thedrr;
 	struct drr_begin *drrb = &thedrr.drr_u.drr_begin;
@@ -213,6 +214,7 @@ main(int argc, char *argv[])
 	struct drr_free *drrf = &thedrr.drr_u.drr_free;
 	struct drr_spill *drrs = &thedrr.drr_u.drr_spill;
 	struct drr_write_embedded *drrwe = &thedrr.drr_u.drr_write_embedded;
+	struct drr_object_range *drror = &thedrr.drr_u.drr_object_range;
 	struct drr_checksum *drrc = &thedrr.drr_u.drr_checksum;
 	char c;
 	boolean_t verbose = B_FALSE;
@@ -412,24 +414,29 @@ main(int argc, char *argv[])
 				drro->drr_blksz = BSWAP_32(drro->drr_blksz);
 				drro->drr_bonuslen =
 				    BSWAP_32(drro->drr_bonuslen);
+				drro->drr_raw_bonuslen =
+				    BSWAP_32(drro->drr_raw_bonuslen);
 				drro->drr_toguid = BSWAP_64(drro->drr_toguid);
 			}
+
+			payload_size = DRR_OBJECT_PAYLOAD_SIZE(drro);
+
 			if (verbose) {
 				(void) printf("OBJECT object = %llu type = %u "
-				    "bonustype = %u blksz = %u bonuslen = %u\n",
+				    "bonustype = %u blksz = %u bonuslen = %u "
+				    "raw_bonuslen = %u flags = %u\n",
 				    (u_longlong_t)drro->drr_object,
 				    drro->drr_type,
 				    drro->drr_bonustype,
 				    drro->drr_blksz,
-				    drro->drr_bonuslen);
+				    drro->drr_bonuslen,
+				    drro->drr_raw_bonuslen,
+				    drro->drr_flags);
 			}
 			if (drro->drr_bonuslen > 0) {
-				(void) ssread(buf,
-				    P2ROUNDUP(drro->drr_bonuslen, 8), &zc);
-				if (dump) {
-					print_block(buf,
-					    P2ROUNDUP(drro->drr_bonuslen, 8));
-				}
+				(void) ssread(buf, payload_size, &zc);
+				if (dump)
+					print_block(buf, payload_size);
 			}
 			break;
 
@@ -463,7 +470,7 @@ main(int argc, char *argv[])
 				    BSWAP_64(drrw->drr_compressed_size);
 			}
 
-			uint64_t payload_size = DRR_WRITE_PAYLOAD_SIZE(drrw);
+			payload_size = DRR_WRITE_PAYLOAD_SIZE(drrw);
 
 			/*
 			 * If this is verbose and/or dump output,
@@ -472,7 +479,8 @@ main(int argc, char *argv[])
 			if (verbose) {
 				(void) printf("WRITE object = %llu type = %u "
 				    "checksum type = %u compression type = %u\n"
-				    "    offset = %llu logical_size = %llu "
+				    "    flags = %u offset = %llu "
+				    "logical_size = %llu "
 				    "compressed_size = %llu "
 				    "payload_size = %llu "
 				    "props = %llx\n",
@@ -480,6 +488,7 @@ main(int argc, char *argv[])
 				    drrw->drr_type,
 				    drrw->drr_checksumtype,
 				    drrw->drr_compressiontype,
+				    drrw->drr_flags,
 				    (u_longlong_t)drrw->drr_offset,
 				    (u_longlong_t)drrw->drr_logical_size,
 				    (u_longlong_t)drrw->drr_compressed_size,
@@ -555,6 +564,7 @@ main(int argc, char *argv[])
 			if (do_byteswap) {
 				drrs->drr_object = BSWAP_64(drrs->drr_object);
 				drrs->drr_length = BSWAP_64(drrs->drr_length);
+				drrs->drr_type = BSWAP_32(drrs->drr_type);
 			}
 			if (verbose) {
 				(void) printf("SPILL block for object = %llu "
@@ -598,6 +608,22 @@ main(int argc, char *argv[])
 			(void) ssread(buf,
 			    P2ROUNDUP(drrwe->drr_psize, 8), &zc);
 			break;
+			case DRR_OBJECT_RANGE:
+				if (do_byteswap) {
+					drror->drr_firstobj =
+					    BSWAP_64(drror->drr_firstobj);
+					drror->drr_numslots =
+					    BSWAP_64(drror->drr_numslots);
+					drror->drr_toguid = BSWAP_64(drror->drr_toguid);
+				}
+				if (verbose) {
+					(void) printf("OBJECT_RANGE firstobj = %llu "
+					    "numslots = %llu flags = %u\n",
+					    (u_longlong_t)drror->drr_firstobj,
+					    (u_longlong_t)drror->drr_numslots,
+					    drror->drr_flags);
+				}
+				break;
 		}
 		if (drr->drr_type != DRR_BEGIN && very_verbose) {
 			(void) printf("    checksum = %llx/%llx/%llx/%llx\n",
