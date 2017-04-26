@@ -546,6 +546,7 @@ dnode_sync_free(dnode_t *dn, dmu_tx_t *tx)
 void
 dnode_sync(dnode_t *dn, dmu_tx_t *tx)
 {
+	objset_t *os = dn->dn_objset;
 	dnode_phys_t *dnp = dn->dn_phys;
 	int txgoff = tx->tx_txg & TXG_MASK;
 	list_t *list = &dn->dn_dirty_records[txgoff];
@@ -560,8 +561,11 @@ dnode_sync(dnode_t *dn, dmu_tx_t *tx)
 
 	ASSERT(dn->dn_dbuf == NULL || arc_released(dn->dn_dbuf->db_buf));
 
-	if (dmu_objset_userused_enabled(dn->dn_objset) &&
-	    !DMU_OBJECT_IS_SPECIAL(dn->dn_object)) {
+	/* do user accounting if it is enabled and this is not a raw recv */
+	if (dmu_objset_userused_enabled(os) &&
+	    !DMU_OBJECT_IS_SPECIAL(dn->dn_object) && (!os->os_encrypted ||
+	    spa_keystore_lookup_key(os->os_spa, dmu_objset_id(os),
+	    NULL, NULL) == 0)) {
 		mutex_enter(&dn->dn_mtx);
 		dn->dn_oldused = DN_USED_BYTES(dn->dn_phys);
 		dn->dn_oldflags = dn->dn_phys->dn_flags;

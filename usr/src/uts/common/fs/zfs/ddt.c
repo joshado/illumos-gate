@@ -21,7 +21,7 @@
 
 /*
  * Copyright (c) 2009, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2012, 2015 by Delphix. All rights reserved.
+ * Copyright (c) 2012, 2016 by Delphix. All rights reserved.
  */
 
 #include <sys/zfs_context.h>
@@ -36,6 +36,7 @@
 #include <sys/zio_checksum.h>
 #include <sys/zio_compress.h>
 #include <sys/dsl_scan.h>
+#include <sys/abd.h>
 
 /*
  * Enable/disable prefetching of dedup-ed blocks which are going to be freed.
@@ -252,6 +253,10 @@ ddt_bp_fill(const ddt_phys_t *ddp, blkptr_t *bp, uint64_t txg)
 	BP_SET_BIRTH(bp, txg, ddp->ddp_phys_birth);
 }
 
+/*
+ * The bp created via this function may be used for repairs and scrub, but it
+ * will be missing the salt / IV required to do a full decrypting read.
+ */
 void
 ddt_bp_create(enum zio_checksum checksum,
     const ddt_key_t *ddk, const ddt_phys_t *ddp, blkptr_t *bp)
@@ -262,11 +267,12 @@ ddt_bp_create(enum zio_checksum checksum,
 		ddt_bp_fill(ddp, bp, ddp->ddp_phys_birth);
 
 	bp->blk_cksum = ddk->ddk_cksum;
-	bp->blk_fill = 1;
 
 	BP_SET_LSIZE(bp, DDK_GET_LSIZE(ddk));
 	BP_SET_PSIZE(bp, DDK_GET_PSIZE(ddk));
 	BP_SET_COMPRESS(bp, DDK_GET_COMPRESS(ddk));
+	BP_SET_ENCRYPTED(bp, DDK_GET_ENCRYPTED(ddk));
+	BP_SET_FILL(bp, 1);
 	BP_SET_CHECKSUM(bp, checksum);
 	BP_SET_TYPE(bp, DMU_OT_DEDUP);
 	BP_SET_LEVEL(bp, 0);
@@ -283,6 +289,7 @@ ddt_key_fill(ddt_key_t *ddk, const blkptr_t *bp)
 	DDK_SET_LSIZE(ddk, BP_GET_LSIZE(bp));
 	DDK_SET_PSIZE(ddk, BP_GET_PSIZE(bp));
 	DDK_SET_COMPRESS(ddk, BP_GET_COMPRESS(bp));
+	DDK_SET_ENCRYPTED(ddk, BP_IS_ENCRYPTED(bp));
 }
 
 void
@@ -366,7 +373,7 @@ ddt_stat_generate(ddt_t *ddt, ddt_entry_t *dde, ddt_stat_t *dds)
 		if (ddp->ddp_phys_birth == 0)
 			continue;
 
-		for (int d = 0; d < SPA_DVAS_PER_BP; d++)
+		for (int d = 0; d < DDE_GET_NDVAS(dde); d++)
 			dsize += dva_get_dsize_sync(spa, &ddp->ddp_dva[d]);
 
 		dds->dds_blocks += 1;
@@ -520,6 +527,7 @@ ddt_ditto_copies_needed(ddt_t *ddt, ddt_entry_t *dde, ddt_phys_t *ddp_willref)
 	uint64_t ditto = spa->spa_dedup_ditto;
 	int total_copies = 0;
 	int desired_copies = 0;
+	int copies_needed = 0;
 
 	for (int p = DDT_PHYS_SINGLE; p <= DDT_PHYS_TRIPLE; p++) {
 		ddt_phys_t *ddp = &dde->dde_phys[p];
@@ -545,7 +553,13 @@ ddt_ditto_copies_needed(ddt_t *ddt, ddt_entry_t *dde, ddt_phys_t *ddp_willref)
 	if (total_refcnt >= ditto * ditto)
 		desired_copies++;
 
-	return (MAX(desired_copies, total_copies) - total_copies);
+	copies_needed = MAX(desired_copies, total_copies) - total_copies;
+
+	/* encrypted blocks store their IV in DVA[2] */
+	if (DDK_GET_ENCRYPTED(&dde->dde_key))
+		copies_needed = MIN(copies_needed, SPA_DVAS_PER_BP - 1);
+
+	return (copies_needed);
 }
 
 int
@@ -555,7 +569,7 @@ ddt_ditto_copies_present(ddt_entry_t *dde)
 	dva_t *dva = ddp->ddp_dva;
 	int copies = 0 - DVA_GET_GANG(dva);
 
-	for (int d = 0; d < SPA_DVAS_PER_BP; d++, dva++)
+	for (int d = 0; d < DDE_GET_NDVAS(dde); d++, dva++)
 		if (DVA_IS_VALID(dva))
 			copies++;
 
@@ -651,9 +665,8 @@ ddt_free(ddt_entry_t *dde)
 	for (int p = 0; p < DDT_PHYS_TYPES; p++)
 		ASSERT(dde->dde_lead_zio[p] == NULL);
 
-	if (dde->dde_repair_data != NULL)
-		zio_buf_free(dde->dde_repair_data,
-		    DDK_GET_PSIZE(&dde->dde_key));
+	if (dde->dde_repair_abd != NULL)
+		abd_free(dde->dde_repair_abd);
 
 	cv_destroy(&dde->dde_cv);
 	kmem_free(dde, sizeof (*dde));
@@ -917,7 +930,7 @@ ddt_repair_done(ddt_t *ddt, ddt_entry_t *dde)
 
 	ddt_enter(ddt);
 
-	if (dde->dde_repair_data != NULL && spa_writeable(ddt->ddt_spa) &&
+	if (dde->dde_repair_abd != NULL && spa_writeable(ddt->ddt_spa) &&
 	    avl_find(&ddt->ddt_repair_tree, dde, &where) == NULL)
 		avl_insert(&ddt->ddt_repair_tree, dde, where);
 	else
@@ -954,7 +967,7 @@ ddt_repair_entry(ddt_t *ddt, ddt_entry_t *dde, ddt_entry_t *rdde, zio_t *rio)
 			continue;
 		ddt_bp_create(ddt->ddt_checksum, ddk, ddp, &blk);
 		zio_nowait(zio_rewrite(zio, zio->io_spa, 0, &blk,
-		    rdde->dde_repair_data, DDK_GET_PSIZE(rddk), NULL, NULL,
+		    rdde->dde_repair_abd, DDK_GET_PSIZE(rddk), NULL, NULL,
 		    ZIO_PRIORITY_SYNC_WRITE, ZIO_DDT_CHILD_FLAGS(zio), NULL));
 	}
 

@@ -1378,6 +1378,7 @@ SMBFS_OBJS +=	smbfs_vfsops.o	smbfs_vnops.o	smbfs_node.o	\
 BOOTFS_OBJS +=	bootfs_construct.o bootfs_vfsops.o bootfs_vnops.o
 
 ZFS_COMMON_OBJS +=		\
+	abd.o			\
 	arc.o			\
 	blkptr.o		\
 	bplist.o		\
@@ -1398,6 +1399,7 @@ ZFS_COMMON_OBJS +=		\
 	dnode_sync.o		\
 	dsl_bookmark.o		\
 	dsl_dir.o		\
+	dsl_crypt.o		\
 	dsl_dataset.o		\
 	dsl_deadlist.o		\
 	dsl_destroy.o		\
@@ -1454,6 +1456,7 @@ ZFS_COMMON_OBJS +=		\
 	zio.o			\
 	zio_checksum.o		\
 	zio_compress.o		\
+	zio_crypt.o		\
 	zio_inject.o		\
 	zle.o			\
 	zrlock.o

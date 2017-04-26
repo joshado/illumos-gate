@@ -20,8 +20,8 @@
  */
 /*
  * Copyright (c) 2008, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2011, 2015 by Delphix. All rights reserved.
  * Copyright 2016 Gary Mills
+ * Copyright (c) 2011, 2016 by Delphix. All rights reserved.
  */
 
 #include <sys/dsl_scan.h>
@@ -47,6 +47,7 @@
 #include <sys/sa.h>
 #include <sys/sa_impl.h>
 #include <sys/zfeature.h>
+#include <sys/abd.h>
 #ifdef _KERNEL
 #include <sys/zfs_vfsops.h>
 #endif
@@ -549,7 +550,7 @@ dsl_scan_zil(dsl_pool_t *dp, zil_header_t *zh)
 	zilog = zil_alloc(dp->dp_meta_objset, zh);
 
 	(void) zil_parse(zilog, dsl_scan_zil_block, dsl_scan_zil_record, &zsa,
-	    claim_txg);
+	    claim_txg, B_FALSE);
 
 	zil_free(zilog);
 }
@@ -561,6 +562,7 @@ dsl_scan_prefetch(dsl_scan_t *scn, arc_buf_t *buf, blkptr_t *bp,
 {
 	zbookmark_phys_t czb;
 	arc_flags_t flags = ARC_FLAG_NOWAIT | ARC_FLAG_PREFETCH;
+	int zio_flags = ZIO_FLAG_CANFAIL | ZIO_FLAG_SCAN_THREAD;
 
 	if (zfs_no_scrub_prefetch)
 		return;
@@ -569,11 +571,16 @@ dsl_scan_prefetch(dsl_scan_t *scn, arc_buf_t *buf, blkptr_t *bp,
 	    (BP_GET_LEVEL(bp) == 0 && BP_GET_TYPE(bp) != DMU_OT_DNODE))
 		return;
 
+	if (BP_IS_ENCRYPTED(bp)) {
+		ASSERT3U(BP_GET_TYPE(bp), ==, DMU_OT_DNODE);
+		ASSERT3U(BP_GET_LEVEL(bp), ==, 0);
+		zio_flags |= ZIO_FLAG_RAW;
+	}
+
 	SET_BOOKMARK(&czb, objset, object, BP_GET_LEVEL(bp), blkid);
 
 	(void) arc_read(scn->scn_zio_root, scn->scn_dp->dp_spa, bp,
-	    NULL, NULL, ZIO_PRIORITY_ASYNC_READ,
-	    ZIO_FLAG_CANFAIL | ZIO_FLAG_SCAN_THREAD, &flags, &czb);
+	    NULL, NULL, ZIO_PRIORITY_ASYNC_READ, zio_flags, &flags, &czb);
 }
 
 static boolean_t
@@ -658,6 +665,11 @@ dsl_scan_recurse(dsl_scan_t *scn, dsl_dataset_t *ds, dmu_objset_type_t ostype,
 		int i, j;
 		int epb = BP_GET_LSIZE(bp) >> DNODE_SHIFT;
 		arc_buf_t *buf;
+
+		if (BP_IS_ENCRYPTED(bp)) {
+			ASSERT3U(BP_GET_COMPRESS(bp), ==, ZIO_COMPRESS_OFF);
+			zio_flags |= ZIO_FLAG_RAW;
+		}
 
 		err = arc_read(NULL, dp->dp_spa, bp, arc_getbuf_func, &buf,
 		    ZIO_PRIORITY_ASYNC_READ, zio_flags, &flags, zb);
@@ -779,7 +791,7 @@ dsl_scan_visitbp(blkptr_t *bp, const zbookmark_phys_t *zb,
 		return;
 
 	/*
-	 * If dsl_scan_ddt() has aready visited this block, it will have
+	 * If dsl_scan_ddt() has already visited this block, it will have
 	 * already done any translations or scrubbing, so don't call the
 	 * callback again.
 	 */
@@ -1756,7 +1768,7 @@ dsl_scan_scrub_done(zio_t *zio)
 {
 	spa_t *spa = zio->io_spa;
 
-	zio_data_buf_free(zio->io_data, zio->io_size);
+	abd_free(zio->io_abd);
 
 	mutex_enter(&spa->spa_scrub_lock);
 	spa->spa_scrub_inflight--;
@@ -1839,7 +1851,6 @@ dsl_scan_scrub_cb(dsl_pool_t *dp,
 	if (needs_io && !zfs_no_scrub_io) {
 		vdev_t *rvd = spa->spa_root_vdev;
 		uint64_t maxinflight = rvd->vdev_children * zfs_top_maxinflight;
-		void *data = zio_data_buf_alloc(size);
 
 		mutex_enter(&spa->spa_scrub_lock);
 		while (spa->spa_scrub_inflight >= maxinflight)
@@ -1854,9 +1865,9 @@ dsl_scan_scrub_cb(dsl_pool_t *dp,
 		if (ddi_get_lbolt64() - spa->spa_last_io <= zfs_scan_idle)
 			delay(scan_delay);
 
-		zio_nowait(zio_read(NULL, spa, bp, data, size,
-		    dsl_scan_scrub_done, NULL, ZIO_PRIORITY_SCRUB,
-		    zio_flags, zb));
+		zio_nowait(zio_read(NULL, spa, bp,
+		    abd_alloc_for_io(size, B_FALSE), size, dsl_scan_scrub_done,
+		    NULL, ZIO_PRIORITY_SCRUB, zio_flags, zb));
 	}
 
 	/* do not relocate this block */
