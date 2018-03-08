@@ -241,6 +241,8 @@ libzfs_error_description(libzfs_handle_t *hdl)
 	case EZFS_NO_PENDING:
 		return (dgettext(TEXT_DOMAIN, "operation is not "
 		    "in progress"));
+	case EZFS_CRYPTOFAILED:
+		return (dgettext(TEXT_DOMAIN, "encryption failure"));
 	case EZFS_UNKNOWN:
 		return (dgettext(TEXT_DOMAIN, "unknown error"));
 	default:
