@@ -652,6 +652,9 @@ blkptr(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 		crypt_type = "unencrypted";
 	}
 
+	/* XXX this refers to dmu_ot (for BP_IS_ENCRYPTED()),
+	 * which has not been populated */
+
 	SNPRINTF_BLKPTR(mdb_snprintf, '\n', buf, sizeof (buf), bp, type,
 	    checksum, crypt_type, compress);
 
