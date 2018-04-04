@@ -27,6 +27,17 @@
 
 /* Portions Copyright 2010 Robert Milkowski */
 
+/*
+ * ZFS_MDB lets dmu.h know that we don't have dmu_ot, and we will define our
+ * own macros to access the target's dmu_ot.  Therefore it must be defined
+ * before including any ZFS headers.  Note that we don't define
+ * DMU_OT_IS_ENCRYPTED_IMPL() or DMU_OT_BYTESWAP_IMPL(), therefore using them
+ * will result in a compilation error.  If they are needed in the future, we
+ * can implement them similarly to mdb_dmu_ot_is_encrypted_impl().
+ */
+#define ZFS_MDB
+#define DMU_OT_IS_ENCRYPTED_IMPL(ot) mdb_dmu_ot_is_encrypted_impl(ot)
+
 #include <mdb/mdb_ctf.h>
 #include <sys/zfs_context.h>
 #include <sys/mdb_modapi.h>
@@ -66,10 +77,6 @@ enum spa_flags {
 	SPA_FLAG_METASLABS		= 1 << 4,
 	SPA_FLAG_HISTOGRAMS		= 1 << 5
 };
-
-
-const dmu_object_type_info_t dmu_ot[DMU_OT_NUMTYPES] = {0};
-
 
 /*
  * If any of these flags are set, call spa_vdevs in spa_print
@@ -497,11 +504,35 @@ dva(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 	return (DCMD_OK);
 }
 
+typedef struct mdb_dmu_object_type_info {
+	boolean_t ot_encrypt;
+} mdb_dmu_object_type_info_t;
+
+static boolean_t
+mdb_dmu_ot_is_encrypted_impl(dmu_object_type_t ot)
+{
+	mdb_dmu_object_type_info_t mdoti;
+	GElf_Sym sym;
+	size_t sz = mdb_ctf_sizeof_by_name("dmu_object_type_info_t");
+
+	if (mdb_lookup_by_obj(ZFS_OBJ_NAME, "dmu_ot", &sym)) {
+		mdb_warn("failed to find " ZFS_OBJ_NAME "`dmu_ot");
+		return (B_FALSE);
+	}
+
+	if (mdb_ctf_vread(&mdoti, "dmu_object_type_info_t",
+	    "mdb_dmu_object_type_info_t", sym.st_value + sz * ot, 0) != 0) {
+		return (B_FALSE);
+	}
+
+	return (mdoti.ot_encrypt);
+}
+
 /* ARGSUSED */
 static int
 blkptr(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 {
-	char type[80], checksum[80], compress[80], *crypt_type;
+	char type[80], checksum[80], compress[80];
 	blkptr_t blk, *bp = &blk;
 	char buf[BP_SPRINTF_LEN];
 
@@ -520,22 +551,8 @@ blkptr(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 		return (DCMD_ERR);
 	}
 
-	if (BP_IS_ENCRYPTED(bp)) {
-		crypt_type = "encrypted";
-		/* LINTED E_SUSPICIOUS_COMPARISON */
-	} else if (BP_IS_AUTHENTICATED(bp)) {
-		crypt_type = "authenticated";
-	} else if (BP_HAS_INDIRECT_MAC_CKSUM(bp)) {
-		crypt_type = "indirect-MAC";
-	} else {
-		crypt_type = "unencrypted";
-	}
-
-	/* XXX this refers to dmu_ot (for BP_IS_ENCRYPTED()),
-	 * which has not been populated */
-
 	SNPRINTF_BLKPTR(mdb_snprintf, '\n', buf, sizeof (buf), bp, type,
-	    checksum, crypt_type, compress);
+	    checksum, compress);
 
 	mdb_printf("%s\n", buf);
 
@@ -2787,11 +2804,6 @@ zfs_blkstats(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 	zfs_blkstat_t *tzb;
 	uint64_t ditto;
 
-	if (mdb_readvar(&dmu_ot, "dmu_ot") == -1) {
-		mdb_warn("failed to read 'dmu_ot'");
-		return (DCMD_ERR);
-	}
-
 	if (mdb_getopts(argc, argv,
 	    'v', MDB_OPT_SETBITS, TRUE, &verbose,
 	    NULL) != argc)
@@ -2839,8 +2851,8 @@ zfs_blkstats(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 			strcpy(typename, "other");
 		else if (t == DMU_OT_TOTAL)
 			strcpy(typename, "Total");
-		else if (mdb_readstr(typename, sizeof (typename),
-		    (uintptr_t)dmu_ot[t].ot_name) == -1) {
+		else if (enum_lookup("enum dmu_object_type",
+		    t, "DMU_OT_", sizeof (typename), typename) == -1) {
 			mdb_warn("failed to read type name");
 			return (DCMD_ERR);
 		}
