@@ -500,7 +500,7 @@ _NOTE(CONSTCOND) } while (0)
 
 #define	BP_IS_AUTHENTICATED(bp)			\
 	(BP_USES_CRYPT(bp) &&			\
-	BP_GET_LEVEL(bp) <= 0 &&		\
+	BP_GET_LEVEL(bp) == 0 &&		\
 	!DMU_OT_IS_ENCRYPTED(BP_GET_TYPE(bp)))
 
 #define	BP_HAS_INDIRECT_MAC_CKSUM(bp)		\
@@ -669,7 +669,6 @@ _NOTE(CONSTCOND) } while (0)
 	if (bp != NULL) {						\
 		if (BP_IS_ENCRYPTED(bp)) {				\
 			crypt_type = "encrypted";			\
-			/* LINTED E_SUSPICIOUS_COMPARISON */		\
 		} else if (BP_IS_AUTHENTICATED(bp)) {			\
 			crypt_type = "authenticated";			\
 		} else if (BP_HAS_INDIRECT_MAC_CKSUM(bp)) {		\
