@@ -6262,7 +6262,13 @@ arc_release(arc_buf_t *buf, void *tag)
 	 */
 	if (hdr->b_l1hdr.b_state == arc_anon) {
 		mutex_exit(&buf->b_evict_lock);
-		ASSERT(!HDR_IO_IN_PROGRESS(hdr));
+		/*
+		 * If we are called from dmu_convert_mdn_block_to_raw(),
+		 * a write might be in progress.  This is OK because
+		 * the caller won't change the content of this buffer,
+		 * only the flags (via arc_convert_to_raw()).
+		 */
+		/*ASSERT(!HDR_IO_IN_PROGRESS(hdr));*/
 		ASSERT(!HDR_IN_HASH_TABLE(hdr));
 		ASSERT(!HDR_HAS_L2HDR(hdr));
 		ASSERT(HDR_EMPTY(hdr));
