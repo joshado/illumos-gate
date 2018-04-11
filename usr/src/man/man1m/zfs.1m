@@ -1990,7 +1990,7 @@ dataset will become an encryption root.
 Any descendant datasets will inherit their encryption key from the encryption
 root by default, meaning that loading, unloading, or changing the key for the
 encryption root will implicitly do the same for all inheriting datasets.
-f this inheritance is not desired, simply supply a
+If this inheritance is not desired, simply supply a
 .Sy keyformat
 when creating the child dataset or use
 .Nm Cm change-key
@@ -3098,7 +3098,7 @@ You will be able to receive your streams on future versions of ZFS .
 .It Xo
 .Nm
 .Cm send
-.Op Fl Lce
+.Op Fl Lcew
 .Op Fl i Ar snapshot Ns | Ns Ar bookmark
 .Ar filesystem Ns | Ns Ar volume Ns | Ns Ar snapshot
 .Xc
@@ -3184,7 +3184,7 @@ character and following
 If the incremental target is a clone, the incremental source can be the origin
 snapshot, or an earlier snapshot in the origin's filesystem, or the origin's
 origin, etc.
-.It Fl r, -raw
+.It Fl w, -raw
 For encrypted datasets, send data exactly as it exists on disk.
 This allows backups to be taken even if encryption keys are not currently
 loaded.
