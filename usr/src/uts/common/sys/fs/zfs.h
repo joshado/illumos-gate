@@ -1044,6 +1044,20 @@ typedef enum {
 	SPA_LOAD_CREATE		/* creation in progress */
 } spa_load_state_t;
 
+/* supported encryption algorithms */
+enum zio_encrypt {
+	ZIO_CRYPT_INHERIT = 0,
+	ZIO_CRYPT_ON,
+	ZIO_CRYPT_OFF,
+	ZIO_CRYPT_AES_128_CCM,
+	ZIO_CRYPT_AES_192_CCM,
+	ZIO_CRYPT_AES_256_CCM,
+	ZIO_CRYPT_AES_128_GCM,
+	ZIO_CRYPT_AES_192_GCM,
+	ZIO_CRYPT_AES_256_GCM,
+	ZIO_CRYPT_FUNCTIONS
+};
+
 /*
  * Bookmark name values.
  */
