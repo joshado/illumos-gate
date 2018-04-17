@@ -3609,7 +3609,7 @@ zfs_receive_one(libzfs_handle_t *hdl, int infd, const char *tosnap,
 	if (zfs_dataset_exists(hdl, zc.zc_name, ZFS_TYPE_DATASET)) {
 		zfs_handle_t *zhp;
 		boolean_t encrypted;
-		
+
 		/*
 		 * Destination fs exists.  It must be one of these cases:
 		 *  - an incremental send stream
