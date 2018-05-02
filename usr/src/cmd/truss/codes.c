@@ -1289,6 +1289,7 @@ const struct ioc {
 	{ (uint_t)ZFS_IOC_CHANNEL_PROGRAM,	"ZFS_IOC_CHANNEL_PROGRAM",
 		"zfs_cmd_t" },
 	{ (uint_t)ZFS_IOC_POOL_INITIALIZE,	"ZFS_IOC_POOL_INITIALIZE",
+		"zfs_cmd_t" },
 	{ (uint_t)ZFS_IOC_LOAD_KEY,		"ZFS_IOC_LOAD_KEY",
 		"zfs_cmd_t" },
 	{ (uint_t)ZFS_IOC_UNLOAD_KEY,		"ZFS_IOC_UNLOAD_KEY",
