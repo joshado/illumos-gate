@@ -2889,13 +2889,8 @@ receive_free(struct receive_writer_arg *rwa, struct drr_free *drrf)
 	if (drrf->drr_object > rwa->max_object)
 		rwa->max_object = drrf->drr_object;
 
-	if (rwa->raw) {
-		err = dmu_free_long_range_raw(rwa->os, drrf->drr_object,
-		    drrf->drr_offset, drrf->drr_length);
-	} else {
-		err = dmu_free_long_range(rwa->os, drrf->drr_object,
-		    drrf->drr_offset, drrf->drr_length);
-	}
+	err = dmu_free_long_range(rwa->os, drrf->drr_object,
+	    drrf->drr_offset, drrf->drr_length);
 
 	return (err);
 }

@@ -887,7 +887,7 @@ struct arc_callback {
 	boolean_t		acb_encrypted;
 	boolean_t		acb_compressed;
 	boolean_t		acb_noauth;
-	uint64_t		acb_dsobj;
+	zbookmark_phys_t	acb_zb;
 	zio_t			*acb_zio_dummy;
 	arc_callback_t		*acb_next;
 };
@@ -2164,10 +2164,9 @@ error:
  * also decompress the data.
  */
 static int
-arc_hdr_decrypt(arc_buf_hdr_t *hdr, spa_t *spa, uint64_t dsobj)
+arc_hdr_decrypt(arc_buf_hdr_t *hdr, spa_t *spa, const zbookmark_phys_t *zb)
 {
 	int ret;
-	dsl_crypto_key_t *dck = NULL;
 	abd_t *cabd = NULL;
 	void *tmp = NULL;
 	boolean_t no_crypt = B_FALSE;
@@ -2178,25 +2177,9 @@ arc_hdr_decrypt(arc_buf_hdr_t *hdr, spa_t *spa, uint64_t dsobj)
 
 	arc_hdr_alloc_pabd(hdr, B_FALSE);
 
-	/*
-	 * We must be careful to use the passed-in dsobj value here and
-	 * not the value in b_dsobj. b_dsobj is meant to be a best guess for
-	 * the L2ARC, which has the luxury of being able to fail without real
-	 * consequences (the data simply won't make it to the L2ARC). In
-	 * reality, the dsobj stored in the header may belong to a dataset
-	 * that has been unmounted or otherwise disowned, meaning the key
-	 * won't be accessible via that dsobj anymore.
-	 */
-	ret = spa_keystore_lookup_key(spa, dsobj, FTAG, &dck);
-	if (ret != 0) {
-		ret = SET_ERROR(EACCES);
-		goto error;
-	}
-
-	ret = zio_do_crypt_abd(B_FALSE, &dck->dck_key,
-	    hdr->b_crypt_hdr.b_salt, hdr->b_crypt_hdr.b_ot,
-	    hdr->b_crypt_hdr.b_iv, hdr->b_crypt_hdr.b_mac,
-	    HDR_GET_PSIZE(hdr), bswap, hdr->b_l1hdr.b_pabd,
+	ret = spa_do_crypt_abd(B_FALSE, spa, zb, hdr->b_crypt_hdr.b_ot,
+	    B_FALSE, bswap, hdr->b_crypt_hdr.b_salt, hdr->b_crypt_hdr.b_iv,
+	    hdr->b_crypt_hdr.b_mac, HDR_GET_PSIZE(hdr), hdr->b_l1hdr.b_pabd,
 	    hdr->b_crypt_hdr.b_rabd, &no_crypt);
 	if (ret != 0)
 		goto error;
@@ -2236,14 +2219,10 @@ arc_hdr_decrypt(arc_buf_hdr_t *hdr, spa_t *spa, uint64_t dsobj)
 		hdr->b_l1hdr.b_pabd = cabd;
 	}
 
-	spa_keystore_dsl_key_rele(spa, dck, FTAG);
-
 	return (0);
 
 error:
 	arc_hdr_free_pabd(hdr, B_FALSE);
-	if (dck != NULL)
-		spa_keystore_dsl_key_rele(spa, dck, FTAG);
 	if (cabd != NULL)
 		arc_free_data_buf(hdr, cabd, arc_hdr_size(hdr), hdr);
 
@@ -2257,7 +2236,7 @@ error:
  */
 static int
 arc_fill_hdr_crypt(arc_buf_hdr_t *hdr, kmutex_t *hash_lock, spa_t *spa,
-    uint64_t dsobj, boolean_t noauth)
+    const zbookmark_phys_t *zb, boolean_t noauth)
 {
 	int ret;
 
@@ -2271,7 +2250,7 @@ arc_fill_hdr_crypt(arc_buf_hdr_t *hdr, kmutex_t *hash_lock, spa_t *spa,
 		 * The caller requested authenticated data but our data has
 		 * not been authenticated yet. Verify the MAC now if we can.
 		 */
-		ret = arc_hdr_authenticate(hdr, spa, dsobj);
+		ret = arc_hdr_authenticate(hdr, spa, zb->zb_objset);
 		if (ret != 0)
 			goto error;
 	} else if (HDR_HAS_RABD(hdr) && hdr->b_l1hdr.b_pabd == NULL) {
@@ -2280,7 +2259,7 @@ arc_fill_hdr_crypt(arc_buf_hdr_t *hdr, kmutex_t *hash_lock, spa_t *spa,
 		 * unencrypted version was requested we take this opportunity
 		 * to store the decrypted version in the header for future use.
 		 */
-		ret = arc_hdr_decrypt(hdr, spa, dsobj);
+		ret = arc_hdr_decrypt(hdr, spa, zb);
 		if (ret != 0)
 			goto error;
 	}
@@ -2337,7 +2316,8 @@ arc_buf_untransform_in_place(arc_buf_t *buf, kmutex_t *hash_lock)
  * the correct-sized data buffer.
  */
 static int
-arc_buf_fill(arc_buf_t *buf, spa_t *spa, uint64_t dsobj, arc_fill_flags_t flags)
+arc_buf_fill(arc_buf_t *buf, spa_t *spa, const zbookmark_phys_t *zb,
+    arc_fill_flags_t flags)
 {
 	int error = 0;
 	arc_buf_hdr_t *hdr = buf->b_hdr;
@@ -2374,7 +2354,7 @@ arc_buf_fill(arc_buf_t *buf, spa_t *spa, uint64_t dsobj, arc_fill_flags_t flags)
 	 */
 	if (HDR_PROTECTED(hdr)) {
 		error = arc_fill_hdr_crypt(hdr, hash_lock, spa,
-		    dsobj, !!(flags & ARC_FILL_NOAUTH));
+		    zb, !!(flags & ARC_FILL_NOAUTH));
 		if (error != 0) {
 			arc_hdr_set_flags(hdr, ARC_FLAG_IO_ERROR);
 			return (error);
@@ -2515,13 +2495,14 @@ arc_untransform(arc_buf_t *buf, spa_t *spa, const zbookmark_phys_t *zb,
 	if (in_place)
 		flags |= ARC_FILL_IN_PLACE;
 
-	ret = arc_buf_fill(buf, spa, zb->zb_objset, flags);
+	ret = arc_buf_fill(buf, spa, zb, flags);
 	if (ret == ECKSUM) {
 		/*
 		 * Convert authentication and decryption errors to EIO
 		 * (and generate an ereport) before leaving the ARC.
 		 */
 		ret = SET_ERROR(EIO);
+		spa_log_error(spa, zb);
 		zfs_ereport_post(FM_EREPORT_ZFS_AUTHENTICATION,
 		    spa, NULL, zb, NULL, 0, 0);
 	}
@@ -2994,8 +2975,8 @@ arc_can_share(arc_buf_hdr_t *hdr, arc_buf_t *buf)
  * copy was made successfully, or an error code otherwise.
  */
 static int
-arc_buf_alloc_impl(arc_buf_hdr_t *hdr, spa_t *spa, uint64_t dsobj, void *tag,
-    boolean_t encrypted, boolean_t compressed, boolean_t noauth,
+arc_buf_alloc_impl(arc_buf_hdr_t *hdr, spa_t *spa, const zbookmark_phys_t *zb,
+    void *tag, boolean_t encrypted, boolean_t compressed, boolean_t noauth,
     boolean_t fill, arc_buf_t **ret)
 {
 	arc_buf_t *buf;
@@ -3081,7 +3062,8 @@ arc_buf_alloc_impl(arc_buf_hdr_t *hdr, spa_t *spa, uint64_t dsobj, void *tag,
 	 * decompress the data.
 	 */
 	if (fill) {
-		return (arc_buf_fill(buf, spa, dsobj, flags));
+		ASSERT3P(zb, !=, NULL);
+		return (arc_buf_fill(buf, spa, zb, flags));
 	}
 
 	return (0);
@@ -3773,7 +3755,7 @@ arc_alloc_buf(spa_t *spa, void *tag, arc_buf_contents_t type, int32_t size)
 	ASSERT(!MUTEX_HELD(HDR_LOCK(hdr)));
 
 	arc_buf_t *buf = NULL;
-	VERIFY0(arc_buf_alloc_impl(hdr, spa, 0, tag, B_FALSE, B_FALSE,
+	VERIFY0(arc_buf_alloc_impl(hdr, spa, NULL, tag, B_FALSE, B_FALSE,
 	    B_FALSE, B_FALSE, &buf));
 	arc_buf_thaw(buf);
 
@@ -3798,7 +3780,7 @@ arc_alloc_compressed_buf(spa_t *spa, void *tag, uint64_t psize, uint64_t lsize,
 	ASSERT(!MUTEX_HELD(HDR_LOCK(hdr)));
 
 	arc_buf_t *buf = NULL;
-	VERIFY0(arc_buf_alloc_impl(hdr, spa, 0, tag, B_FALSE,
+	VERIFY0(arc_buf_alloc_impl(hdr, spa, NULL, tag, B_FALSE,
 	    B_TRUE, B_FALSE, B_FALSE, &buf));
 	arc_buf_thaw(buf);
 	ASSERT3P(hdr->b_l1hdr.b_freeze_cksum, ==, NULL);
@@ -3852,7 +3834,7 @@ arc_alloc_raw_buf(spa_t *spa, void *tag, uint64_t dsobj, boolean_t byteorder,
 	 * arc_write_ready().
 	 */
 	buf = NULL;
-	VERIFY0(arc_buf_alloc_impl(hdr, spa, dsobj, tag, B_TRUE, B_TRUE,
+	VERIFY0(arc_buf_alloc_impl(hdr, spa, NULL, tag, B_TRUE, B_TRUE,
 	    B_FALSE, B_FALSE, &buf));
 	arc_buf_thaw(buf);
 	ASSERT3P(hdr->b_l1hdr.b_freeze_cksum, ==, NULL);
@@ -5616,16 +5598,9 @@ arc_read_done(zio_t *zio)
 			continue;
 
 		int error = arc_buf_alloc_impl(hdr, zio->io_spa,
-		    acb->acb_dsobj, acb->acb_private, acb->acb_encrypted,
+		    &acb->acb_zb, acb->acb_private, acb->acb_encrypted,
 		    acb->acb_compressed, acb->acb_noauth, B_TRUE,
 		    &acb->acb_buf);
-		if (error != 0) {
-			(void) remove_reference(hdr, hash_lock,
-			    acb->acb_private);
-			arc_buf_destroy_impl(acb->acb_buf);
-			acb->acb_buf = NULL;
-		}
-
 		if (error != 0) {
 			/*
 			 * Decompression failed.  Set io_error
@@ -5653,7 +5628,7 @@ arc_read_done(zio_t *zio)
 		 * encryption key wasn't loaded
 		 */
 		ASSERT((zio->io_flags & ZIO_FLAG_SPECULATIVE) ||
-		    error != ENOENT);
+		    error != EACCES);
 
 		/*
 		 * If we failed to decrypt, report an error now (as the zio
@@ -5662,11 +5637,10 @@ arc_read_done(zio_t *zio)
 		if (error == ECKSUM) {
 			ASSERT(BP_IS_PROTECTED(bp));
 			error = SET_ERROR(EIO);
-			spa_log_error(zio->io_spa, &zio->io_bookmark);
 			if ((zio->io_flags & ZIO_FLAG_SPECULATIVE) == 0) {
+				spa_log_error(zio->io_spa, &acb->acb_zb);
 				zfs_ereport_post(FM_EREPORT_ZFS_AUTHENTICATION,
-				    zio->io_spa, NULL, &zio->io_bookmark, zio,
-				    0, 0);
+				    zio->io_spa, NULL, &acb->acb_zb, zio, 0, 0);
 			}
 		}
 	}
@@ -5687,7 +5661,7 @@ arc_read_done(zio_t *zio)
 	ASSERT(refcount_is_zero(&hdr->b_l1hdr.b_refcnt) ||
 	    callback_list != NULL);
 
-	if (no_zio_error) {
+	if (zio->io_error == 0) {
 		arc_hdr_verify(hdr, zio->io_bp);
 	} else {
 		arc_hdr_set_flags(hdr, ARC_FLAG_IO_ERROR);
@@ -5856,7 +5830,7 @@ top:
 				acb->acb_compressed = compressed_read;
 				acb->acb_encrypted = encrypted_read;
 				acb->acb_noauth = noauth_read;
-				acb->acb_dsobj = zb->zb_objset;
+				acb->acb_zb = *zb;
 				if (pio != NULL)
 					acb->acb_zio_dummy = zio_null(pio,
 					    spa, NULL, NULL, NULL, zio_flags);
@@ -5892,18 +5866,22 @@ top:
 			ASSERT(!BP_IS_EMBEDDED(bp) || !BP_IS_HOLE(bp));
 
 			/* Get a buf with the desired data in it. */
-			rc = arc_buf_alloc_impl(hdr, spa, zb->zb_objset,
-			    private, encrypted_read, compressed_read,
-			    noauth_read, B_TRUE, &buf);
+			rc = arc_buf_alloc_impl(hdr, spa, zb, private,
+			    encrypted_read, compressed_read, noauth_read,
+			    B_TRUE, &buf);
 			if (rc == ECKSUM) {
 				/*
 				 * Convert authentication and decryption errors
-				 * to EIO (and generate an ereport) before
-				 * leaving the ARC.
+				 * to EIO (and generate an ereport if needed)
+				 * before leaving the ARC.
 				 */
 				rc = SET_ERROR(EIO);
-				zfs_ereport_post(FM_EREPORT_ZFS_AUTHENTICATION,
-				    spa, NULL, zb, NULL, 0, 0);
+				if ((zio_flags & ZIO_FLAG_SPECULATIVE) == 0) {
+					spa_log_error(spa, zb);
+					zfs_ereport_post(
+					    FM_EREPORT_ZFS_AUTHENTICATION,
+					    spa, NULL, zb, NULL, 0, 0);
+				}
 			}
 			if (rc != 0) {
 				(void) remove_reference(hdr, hash_lock,
@@ -5913,7 +5891,7 @@ top:
 			}
 			/* assert any errors weren't due to unloaded keys */
 			ASSERT((zio_flags & ZIO_FLAG_SPECULATIVE) ||
-			    rc != ENOENT);
+			    rc != EACCES);
 		} else if (*arc_flags & ARC_FLAG_PREFETCH &&
 		    refcount_count(&hdr->b_l1hdr.b_refcnt) == 0) {
 			arc_hdr_set_flags(hdr, ARC_FLAG_PREFETCH);
@@ -6052,7 +6030,7 @@ top:
 		acb->acb_compressed = compressed_read;
 		acb->acb_encrypted = encrypted_read;
 		acb->acb_noauth = noauth_read;
-		acb->acb_dsobj = zb->zb_objset;
+		acb->acb_zb = *zb;
 
 		ASSERT3P(hdr->b_l1hdr.b_acb, ==, NULL);
 		hdr->b_l1hdr.b_acb = acb;
@@ -6491,7 +6469,8 @@ arc_write_ready(zio_t *zio)
 	arc_write_callback_t *callback = zio->io_private;
 	arc_buf_t *buf = callback->awcb_buf;
 	arc_buf_hdr_t *hdr = buf->b_hdr;
-	uint64_t psize = BP_IS_HOLE(zio->io_bp) ? 0 : BP_GET_PSIZE(zio->io_bp);
+	blkptr_t *bp = zio->io_bp;
+	uint64_t psize = BP_IS_HOLE(bp) ? 0 : BP_GET_PSIZE(bp);
 
 	ASSERT(HDR_HAS_L1HDR(hdr));
 	ASSERT(!refcount_is_zero(&buf->b_hdr->b_l1hdr.b_refcnt));
@@ -6528,42 +6507,42 @@ arc_write_ready(zio_t *zio)
 
 	arc_hdr_set_flags(hdr, ARC_FLAG_IO_IN_PROGRESS);
 
-	if (BP_IS_PROTECTED(zio->io_bp) != !!HDR_PROTECTED(hdr))
-		hdr = arc_hdr_realloc_crypt(hdr, BP_IS_PROTECTED(zio->io_bp));
+	if (BP_IS_PROTECTED(bp) != !!HDR_PROTECTED(hdr))
+		hdr = arc_hdr_realloc_crypt(hdr, BP_IS_PROTECTED(bp));
 
-	if (BP_IS_PROTECTED(zio->io_bp)) {
+	if (BP_IS_PROTECTED(bp)) {
 		/* ZIL blocks are written through zio_rewrite */
-		ASSERT3U(BP_GET_TYPE(zio->io_bp), !=, DMU_OT_INTENT_LOG);
+		ASSERT3U(BP_GET_TYPE(bp), !=, DMU_OT_INTENT_LOG);
 		ASSERT(HDR_PROTECTED(hdr));
 
-		if (BP_SHOULD_BYTESWAP(zio->io_bp)) {
-			if (BP_GET_LEVEL(zio->io_bp) > 0) {
+		if (BP_SHOULD_BYTESWAP(bp)) {
+			if (BP_GET_LEVEL(bp) > 0) {
 				hdr->b_l1hdr.b_byteswap = DMU_BSWAP_UINT64;
 			} else {
 				hdr->b_l1hdr.b_byteswap =
-				    DMU_OT_BYTESWAP(BP_GET_TYPE(zio->io_bp));
+				    DMU_OT_BYTESWAP(BP_GET_TYPE(bp));
 			}
 		} else {
 			hdr->b_l1hdr.b_byteswap = DMU_BSWAP_NUMFUNCS;
 		}
 
-		hdr->b_crypt_hdr.b_ot = BP_GET_TYPE(zio->io_bp);
+		hdr->b_crypt_hdr.b_ot = BP_GET_TYPE(bp);
 		hdr->b_crypt_hdr.b_dsobj = zio->io_bookmark.zb_objset;
-		zio_crypt_decode_params_bp(zio->io_bp, hdr->b_crypt_hdr.b_salt,
+		zio_crypt_decode_params_bp(bp, hdr->b_crypt_hdr.b_salt,
 		    hdr->b_crypt_hdr.b_iv);
-		zio_crypt_decode_mac_bp(zio->io_bp, hdr->b_crypt_hdr.b_mac);
+		zio_crypt_decode_mac_bp(bp, hdr->b_crypt_hdr.b_mac);
 	}
 
 	/*
 	 * If this block was written for raw encryption but the zio layer
 	 * ended up only authenticating it, adjust the buffer flags now.
 	 */
-	if (BP_IS_AUTHENTICATED(zio->io_bp) && ARC_BUF_ENCRYPTED(buf)) {
+	if (BP_IS_AUTHENTICATED(bp) && ARC_BUF_ENCRYPTED(buf)) {
 		arc_hdr_set_flags(hdr, ARC_FLAG_NOAUTH);
 		buf->b_flags &= ~ARC_BUF_FLAG_ENCRYPTED;
-		if (BP_GET_COMPRESS(zio->io_bp) == ZIO_COMPRESS_OFF)
+		if (BP_GET_COMPRESS(bp) == ZIO_COMPRESS_OFF)
 			buf->b_flags &= ~ARC_BUF_FLAG_COMPRESSED;
-	} else if (BP_IS_HOLE(zio->io_bp) && ARC_BUF_ENCRYPTED(buf)) {
+	} else if (BP_IS_HOLE(bp) && ARC_BUF_ENCRYPTED(buf)) {
 		buf->b_flags &= ~ARC_BUF_FLAG_ENCRYPTED;
 		buf->b_flags &= ~ARC_BUF_FLAG_COMPRESSED;
 	}
@@ -6572,11 +6551,11 @@ arc_write_ready(zio_t *zio)
 	arc_cksum_compute(buf);
 
 	enum zio_compress compress;
-	if (BP_IS_HOLE(zio->io_bp) || BP_IS_EMBEDDED(zio->io_bp)) {
+	if (BP_IS_HOLE(bp) || BP_IS_EMBEDDED(bp)) {
 		compress = ZIO_COMPRESS_OFF;
 	} else {
-		ASSERT3U(HDR_GET_LSIZE(hdr), ==, BP_GET_LSIZE(zio->io_bp));
-		compress = BP_GET_COMPRESS(zio->io_bp);
+		ASSERT3U(HDR_GET_LSIZE(hdr), ==, BP_GET_LSIZE(bp));
+		compress = BP_GET_COMPRESS(bp);
 	}
 	HDR_SET_PSIZE(hdr, psize);
 	arc_hdr_set_compress(hdr, compress);
@@ -6609,7 +6588,7 @@ arc_write_ready(zio_t *zio)
 		 * user may have disabled compressed ARC, thus we must check the
 		 * hdr's compression setting rather than the io_bp's.
 		 */
-		if (BP_IS_ENCRYPTED(zio->io_bp)) {
+		if (BP_IS_ENCRYPTED(bp)) {
 			ASSERT3U(psize, >, 0);
 			arc_hdr_alloc_pabd(hdr, B_TRUE);
 			abd_copy(hdr->b_crypt_hdr.b_rabd, zio->io_abd, psize);
@@ -6632,7 +6611,7 @@ arc_write_ready(zio_t *zio)
 	}
 
 out:
-	arc_hdr_verify(hdr, zio->io_bp);
+	arc_hdr_verify(hdr, bp);
 }
 
 static void
@@ -7728,7 +7707,6 @@ l2arc_untransform(zio_t *zio, l2arc_read_callback_t *cb)
 	spa_t *spa = zio->io_spa;
 	arc_buf_hdr_t *hdr = cb->l2rcb_hdr;
 	blkptr_t *bp = zio->io_bp;
-	dsl_crypto_key_t *dck = NULL;
 	uint8_t salt[ZIO_DATA_SALT_LEN];
 	uint8_t iv[ZIO_DATA_IV_LEN];
 	uint8_t mac[ZIO_DATA_MAC_LEN];
@@ -7749,30 +7727,19 @@ l2arc_untransform(zio_t *zio, l2arc_read_callback_t *cb)
 	 * until arc_read_done().
 	 */
 	if (BP_IS_ENCRYPTED(bp)) {
-		abd_t *eabd = arc_get_data_abd(hdr,
-		    arc_hdr_size(hdr), hdr);
+		abd_t *eabd = arc_get_data_abd(hdr, arc_hdr_size(hdr), hdr);
 
 		zio_crypt_decode_params_bp(bp, salt, iv);
 		zio_crypt_decode_mac_bp(bp, mac);
 
-		ret = spa_keystore_lookup_key(spa,
-		    cb->l2rcb_zb.zb_objset, FTAG, &dck);
+		ret = spa_do_crypt_abd(B_FALSE, spa, &cb->l2rcb_zb,
+		    BP_GET_TYPE(bp), BP_GET_DEDUP(bp), BP_SHOULD_BYTESWAP(bp),
+		    salt, iv, mac, HDR_GET_PSIZE(hdr), eabd,
+		    hdr->b_l1hdr.b_pabd, &no_crypt);
 		if (ret != 0) {
 			arc_free_data_abd(hdr, eabd, arc_hdr_size(hdr), hdr);
 			goto error;
 		}
-
-		ret = zio_do_crypt_abd(B_FALSE, &dck->dck_key,
-		    salt, BP_GET_TYPE(bp), iv, mac, HDR_GET_PSIZE(hdr),
-		    BP_SHOULD_BYTESWAP(bp), eabd, hdr->b_l1hdr.b_pabd,
-		    &no_crypt);
-		if (ret != 0) {
-			arc_free_data_abd(hdr, eabd, arc_hdr_size(hdr), hdr);
-			spa_keystore_dsl_key_rele(spa, dck, FTAG);
-			goto error;
-		}
-
-		spa_keystore_dsl_key_rele(spa, dck, FTAG);
 
 		/*
 		 * If we actually performed decryption, replace b_pabd
@@ -8177,9 +8144,9 @@ l2arc_apply_transforms(spa_t *spa, arc_buf_hdr_t *hdr, uint64_t asize,
 			goto error;
 
 		ret = zio_do_crypt_abd(B_TRUE, &dck->dck_key,
-		    hdr->b_crypt_hdr.b_salt, hdr->b_crypt_hdr.b_ot,
-		    hdr->b_crypt_hdr.b_iv, mac, psize, bswap, to_write,
-		    eabd, &no_crypt);
+		    hdr->b_crypt_hdr.b_ot, bswap, hdr->b_crypt_hdr.b_salt,
+		    hdr->b_crypt_hdr.b_iv, mac, psize, to_write, eabd,
+		    &no_crypt);
 		if (ret != 0)
 			goto error;
 

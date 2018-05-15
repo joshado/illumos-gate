@@ -1337,6 +1337,10 @@ zfs_mount_one(zfs_handle_t *zhp, void *arg)
 	mount_state_t *ms = arg;
 	int ret = 0;
 
+	if (zfs_prop_get_int(zhp, ZFS_PROP_KEYSTATUS) ==
+	    ZFS_KEYSTATUS_UNAVAILABLE)
+		return (0);
+
 	if (zfs_mount(zhp, ms->ms_mntopts, ms->ms_mntflags) != 0)
 		ret = ms->ms_mntstatus = -1;
 	return (ret);
@@ -1492,21 +1496,12 @@ zpool_enable_datasets(zpool_handle_t *zhp, const char *mntopts, int flags)
 	if (zfs_iter_filesystems(zfsp, zfs_iter_cb, &cb) != 0)
 		goto out;
 
-	ret = 0;
-	for (i = 0; i < cb.cb_used; i++) {
-		/*
-		 * don't attempt to mount encrypted datasets with
-		 * unloaded keys
-		 */
-		if (zfs_prop_get_int(cb.cb_handles[i], ZFS_PROP_KEYSTATUS) ==
-		    ZFS_KEYSTATUS_UNAVAILABLE)
-			continue;
-
-		if (zfs_mount(cb.cb_handles[i], mntopts, flags) != 0)
-			ret = -1;
-		else
-			good[i] = 1;
-	}
+	ms.ms_mntopts = mntopts;
+	ms.ms_mntflags = flags;
+	zfs_foreach_mountpoint(zhp->zpool_hdl, cb.cb_handles, cb.cb_used,
+	    zfs_mount_one, &ms, B_TRUE);
+	if (ms.ms_mntstatus != 0)
+		ret = ms.ms_mntstatus;
 
 	/*
 	 * Share all filesystems that need to be shared. This needs to be

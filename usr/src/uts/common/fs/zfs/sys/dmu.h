@@ -128,9 +128,9 @@ typedef enum dmu_object_byteswap {
  * MDB doesn't have dmu_ot; it defines these macros itself.
  */
 #ifndef ZFS_MDB
-#define DMU_OT_IS_METADATA_IMPL(ot) (dmu_ot[ot].ot_metadata)
-#define DMU_OT_IS_ENCRYPTED_IMPL(ot) (dmu_ot[ot].ot_encrypt)
-#define DMU_OT_BYTESWAP_IMPL(ot) (dmu_ot[ot].ot_byteswap)
+#define	DMU_OT_IS_METADATA_IMPL(ot) (dmu_ot[ot].ot_metadata)
+#define	DMU_OT_IS_ENCRYPTED_IMPL(ot) (dmu_ot[ot].ot_encrypt)
+#define	DMU_OT_BYTESWAP_IMPL(ot) (dmu_ot[ot].ot_byteswap)
 #endif
 
 #define	DMU_OT_IS_METADATA(ot) (((ot) & DMU_OT_NEWTYPE) ? \
