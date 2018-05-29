@@ -242,9 +242,9 @@ zio_checksum_dedup_select(spa_t *spa, enum zio_checksum child,
  * a tuple which is guaranteed to be unique for the life of the pool.
  */
 static void
-zio_checksum_gang_verifier(zio_cksum_t *zcp, blkptr_t *bp)
+zio_checksum_gang_verifier(zio_cksum_t *zcp, const blkptr_t *bp)
 {
-	dva_t *dva = BP_IDENTITY(bp);
+	const dva_t *dva = BP_IDENTITY(bp);
 	uint64_t txg = BP_PHYSICAL_BIRTH(bp);
 
 	ASSERT(BP_IS_GANG(bp));
@@ -382,8 +382,9 @@ zio_checksum_compute(zio_t *zio, enum zio_checksum checksum,
 }
 
 int
-zio_checksum_error_impl(spa_t *spa, blkptr_t *bp, enum zio_checksum checksum,
-    abd_t *abd, uint64_t size, uint64_t offset, zio_bad_cksum_t *info)
+zio_checksum_error_impl(spa_t *spa, const blkptr_t *bp,
+    enum zio_checksum checksum, abd_t *abd, uint64_t size,
+    uint64_t offset, zio_bad_cksum_t *info)
 {
 	zio_checksum_info_t *ci = &zio_checksum_table[checksum];
 	zio_cksum_t actual_cksum, expected_cksum;

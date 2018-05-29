@@ -99,7 +99,7 @@ const dmu_object_type_info_t dmu_ot[DMU_OT_NUMTYPES] = {
 	{ DMU_BSWAP_UINT8,  FALSE, FALSE, TRUE,  "zvol object"	},
 	{ DMU_BSWAP_ZAP,    TRUE,  FALSE, FALSE, "zvol prop"	},
 	{ DMU_BSWAP_UINT8,  FALSE, FALSE, TRUE,  "other uint8[]"	},
-	{ DMU_BSWAP_UINT64, FALSE, FALSE, TRUE, "other uint64[]"	},
+	{ DMU_BSWAP_UINT64, FALSE, FALSE, TRUE,  "other uint64[]"	},
 	{ DMU_BSWAP_ZAP,    TRUE,  FALSE, FALSE, "other ZAP"	},
 	{ DMU_BSWAP_ZAP,    TRUE,  FALSE, FALSE, "persistent error log"	},
 	{ DMU_BSWAP_UINT8,  TRUE,  FALSE, FALSE, "SPA history"	},

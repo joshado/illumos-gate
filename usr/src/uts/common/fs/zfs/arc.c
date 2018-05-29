@@ -5486,7 +5486,7 @@ arc_getbuf_func(zio_t *zio, int error, arc_buf_t *buf, void *arg)
 }
 
 static void
-arc_hdr_verify(arc_buf_hdr_t *hdr, blkptr_t *bp)
+arc_hdr_verify(arc_buf_hdr_t *hdr, const blkptr_t *bp)
 {
 	if (BP_IS_HOLE(bp) || BP_IS_EMBEDDED(bp)) {
 		ASSERT3U(HDR_GET_PSIZE(hdr), ==, 0);
@@ -5499,6 +5499,49 @@ arc_hdr_verify(arc_buf_hdr_t *hdr, blkptr_t *bp)
 		ASSERT3U(HDR_GET_LSIZE(hdr), ==, BP_GET_LSIZE(bp));
 		ASSERT3U(HDR_GET_PSIZE(hdr), ==, BP_GET_PSIZE(bp));
 		ASSERT3U(!!HDR_PROTECTED(hdr), ==, BP_IS_PROTECTED(bp));
+	}
+}
+
+/*
+ * XXX this should be changed to return an error, and callers
+ * re-read from disk on failure (on nondebug bits).
+ */
+static void
+arc_hdr_verify_checksum(spa_t *spa, arc_buf_hdr_t *hdr, const blkptr_t *bp)
+{
+	arc_hdr_verify(hdr, bp);
+	if (BP_IS_HOLE(bp) || BP_IS_EMBEDDED(bp))
+		return;
+	int err = 0;
+	abd_t *abd = NULL;
+	if (BP_IS_ENCRYPTED(bp)) {
+		if (HDR_HAS_RABD(hdr)) {
+			abd = hdr->b_crypt_hdr.b_rabd;
+		}
+	} else if (HDR_COMPRESSION_ENABLED(hdr)) {
+		abd = hdr->b_l1hdr.b_pabd;
+	}
+	if (abd != NULL) {
+		/*
+		 * The offset is only used for labels, which are not
+		 * cached in the ARC, so it doesn't matter what we
+		 * pass for the offset parameter.
+		 */
+		int psize = HDR_GET_PSIZE(hdr);
+		err = zio_checksum_error_impl(spa, bp,
+		    BP_GET_CHECKSUM(bp), abd, psize, 0, NULL);
+		if (err != 0) {
+			/*
+			 * Use abd_copy_to_buf() rather than
+			 * abd_borrow_buf_copy() so that we are sure to
+			 * include the buf in crash dumps.
+			 */
+			void *buf = kmem_alloc(psize, KM_SLEEP);
+			abd_copy_to_buf(buf, abd, psize);
+			panic("checksum of cached data doesn't match BP "
+			    "err=%u hdr=%p bp=%p abd=%p buf=%p",
+			    err, (void *)hdr, (void *)bp, (void *)abd, buf);
+		}
 	}
 }
 
@@ -5872,6 +5915,8 @@ top:
 				    ARC_FLAG_PREDICTIVE_PREFETCH);
 			}
 			ASSERT(!BP_IS_EMBEDDED(bp) || !BP_IS_HOLE(bp));
+
+			arc_hdr_verify_checksum(spa, hdr, bp);
 
 			/* Get a buf with the desired data in it. */
 			rc = arc_buf_alloc_impl(hdr, spa, zb, private,
