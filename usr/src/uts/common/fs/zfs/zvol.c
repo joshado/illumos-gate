@@ -393,6 +393,7 @@ zvol_replay_truncate(void *arg1, void *arg2, boolean_t byteswap)
  * Replay a TX_WRITE ZIL transaction that didn't get committed
  * after a system failure
  */
+/* ARGSUSED */
 static int
 zvol_replay_write(void *arg1, void *arg2, boolean_t byteswap)
 {
@@ -730,6 +731,7 @@ zvol_update_volsize(objset_t *os, uint64_t volsize)
 {
 	dmu_tx_t *tx;
 	int error;
+	uint64_t txg;
 
 	ASSERT(MUTEX_HELD(&zfsdev_state_lock));
 
@@ -741,10 +743,13 @@ zvol_update_volsize(objset_t *os, uint64_t volsize)
 		dmu_tx_abort(tx);
 		return (error);
 	}
+	txg = dmu_tx_get_txg(tx);
 
 	error = zap_update(os, ZVOL_ZAP_OBJ, "size", 8, 1,
 	    &volsize, tx);
 	dmu_tx_commit(tx);
+
+	txg_wait_synced(dmu_objset_pool(os), txg);
 
 	if (error == 0)
 		error = dmu_free_long_range(os,
