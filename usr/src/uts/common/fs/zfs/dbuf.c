@@ -1019,6 +1019,7 @@ static int
 dbuf_read_impl(dmu_buf_impl_t *db, zio_t *zio, uint32_t flags)
 {
 	dnode_t *dn;
+	arc_buf_t *dn_buf;
 	zbookmark_phys_t zb;
 	arc_flags_t aflags = ARC_FLAG_NOWAIT;
 	int err, zio_flags = 0;
@@ -1032,10 +1033,10 @@ dbuf_read_impl(dmu_buf_impl_t *db, zio_t *zio, uint32_t flags)
 	ASSERT(db->db_state == DB_UNCACHED);
 	ASSERT(db->db_buf == NULL);
 
+	dn_buf = (dn->dn_dbuf != NULL) ? dn->dn_dbuf->db_buf : NULL;
+
 	if (db->db_blkid == DMU_BONUS_BLKID) {
 		int bonuslen = MIN(dn->dn_bonuslen, dn->dn_phys->dn_bonuslen);
-		arc_buf_t *dn_buf = (dn->dn_dbuf != NULL) ?
-		    dn->dn_dbuf->db_buf : NULL;
 
 		/* if the underlying dnode block is encrypted, decrypt it */
 		if (dn_buf != NULL && dn->dn_objset->os_encrypted &&
@@ -1106,17 +1107,6 @@ dbuf_read_impl(dmu_buf_impl_t *db, zio_t *zio, uint32_t flags)
 		return (0);
 	}
 
-	DB_DNODE_EXIT(db);
-
-	db->db_state = DB_READ;
-	mutex_exit(&db->db_mtx);
-
-	if (DBUF_IS_L2CACHEABLE(db))
-		aflags |= ARC_FLAG_L2CACHE;
-
-	SET_BOOKMARK(&zb, dmu_objset_id(db->db_objset),
-	    db->db.db_object, db->db_level, db->db_blkid);
-
 	/*
 	 * All bps of an encrypted os should have the encryption bit set.
 	 * If this is not true it indicates tampering and we report an error.
@@ -1128,7 +1118,38 @@ dbuf_read_impl(dmu_buf_impl_t *db, zio_t *zio, uint32_t flags)
 		return (SET_ERROR(EIO));
 	}
 
+	/*
+	 * If we are doing a decrypting read of a block, make sure we
+	 * have decrypted the dnode associated with it so that the current
+	 * bp's MAC can be verified.
+	 */
+	if (dn_buf != NULL && dn->dn_objset->os_encrypted &&
+	    DMU_OT_IS_ENCRYPTED(dn->dn_bonustype) &&
+	    (flags & DB_RF_NO_DECRYPT) == 0 &&
+	    arc_is_encrypted(dn_buf)) {
+		SET_BOOKMARK(&zb, dmu_objset_id(db->db_objset),
+		    DMU_META_DNODE_OBJECT, 0, dn->dn_dbuf->db_blkid);
+		err = arc_untransform(dn_buf, dn->dn_objset->os_spa,
+		    &zb, B_TRUE);
+		if (err != 0) {
+			DB_DNODE_EXIT(db);
+			mutex_exit(&db->db_mtx);
+			return (err);
+		}
+	}
+
+	DB_DNODE_EXIT(db);
+
+	db->db_state = DB_READ;
+	mutex_exit(&db->db_mtx);
+
+	if (DBUF_IS_L2CACHEABLE(db))
+		aflags |= ARC_FLAG_L2CACHE;
+
 	dbuf_add_ref(db, NULL);
+
+	SET_BOOKMARK(&zb, dmu_objset_id(db->db_objset),
+	    db->db.db_object, db->db_level, db->db_blkid);
 
 	zio_flags = (flags & DB_RF_CANFAIL) ?
 	    ZIO_FLAG_CANFAIL : ZIO_FLAG_MUSTSUCCEED;
@@ -1825,6 +1846,8 @@ dbuf_dirty(dmu_buf_impl_t *db, dmu_tx_t *tx)
 	ddt_prefetch(os->os_spa, db->db_blkptr);
 
 	if (db->db_level == 0) {
+		ASSERT(!db->db_objset->os_raw_receive ||
+		    dn->dn_maxblkid >= db->db_blkid);
 		dnode_new_blkid(dn, db->db_blkid, tx, drop_struct_lock);
 		ASSERT(dn->dn_maxblkid >= db->db_blkid);
 	}
@@ -3567,8 +3590,10 @@ dbuf_write_ready(zio_t *zio, arc_buf_t *buf, void *vdb)
 	if (db->db_level == 0) {
 		mutex_enter(&dn->dn_mtx);
 		if (db->db_blkid > dn->dn_phys->dn_maxblkid &&
-		    db->db_blkid != DMU_SPILL_BLKID)
+		    db->db_blkid != DMU_SPILL_BLKID) {
+			ASSERT0(db->db_objset->os_raw_receive);
 			dn->dn_phys->dn_maxblkid = db->db_blkid;
+		}
 		mutex_exit(&dn->dn_mtx);
 
 		if (dn->dn_type == DMU_OT_DNODE) {
