@@ -1265,6 +1265,8 @@ SMBSRV_OBJS +=	$(SMBSRV_SHARED_OBJS)			\
 PCFS_OBJS +=	pc_alloc.o	pc_dir.o	pc_node.o	pc_subr.o \
 		pc_vfsops.o	pc_vnops.o
 
+SQUASHFS_OBJS += squash_vfsops.o
+
 PROC_OBJS +=	prargv.o	prcontrol.o	prioctl.o	prsubr.o \
 		prusrio.o	prvfsops.o	prvnops.o
 

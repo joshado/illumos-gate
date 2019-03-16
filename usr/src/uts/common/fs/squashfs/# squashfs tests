@@ -1,0 +1,15 @@
+# squashfs tests
+
+ * mount squashfs.img /mnt
+
+ * mount  <some file that doesn't exist> /mnt
+ 
+ * lofiadm -a squashfs.img
+  mount /dev/lofi/<id> /mnt
+
+ * mount  <invalid image> /mnt
+
+
+ ls /mnt
+ cat /mnt
+ unmount when it's your working directory!
